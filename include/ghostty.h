@@ -1224,6 +1224,145 @@ GHOSTTY_API void ghostty_set_window_background_blur(ghostty_app_t, void*);
 // Benchmark API, if available.
 GHOSTTY_API bool ghostty_benchmark_cli(const char*, const char*);
 
+/* --- cmux patch #1: cell-grid export (header-only declarations) --- */
+/*
+ * The Zig implementation lives in src/apprt/embedded_read_cells.zig
+ * on the cmux/cell-grid-export-and-output-tee branch. Header is
+ * shipped separately so the cmux Swift bridge can compile against the
+ * ABI before the xcframework rebuild lands. See cmux's docs at
+ * docs/http-terminal-api-design.md §10 and the plan's Tasks 1.5-1.9.
+ *
+ * Contract: ghostty_surface_read_cells acquires renderer_state.mutex,
+ * walks the live screen's page list directly (NO clamped point-tag),
+ * copies cells/styles/cursor/wrap-flags into an owned arena, and
+ * returns. ghostty_cell_grid_free releases the arena.
+ *
+ * Wide enum is 4-valued (NARROW/WIDE/SPACER_TAIL/SPACER_HEAD) per D25.
+ * Hyperlink table per call per D26. semantic_available top-level bool
+ * per D27.
+ */
+
+typedef enum {
+    GHOSTTY_CELL_REGION_VIEWPORT = 0,
+    GHOSTTY_CELL_REGION_SCREEN = 1,
+    GHOSTTY_CELL_REGION_SCROLLBACK = 2,
+} ghostty_cell_region_e;
+
+typedef enum {
+    GHOSTTY_CELL_WIDE_NARROW = 0,
+    GHOSTTY_CELL_WIDE_WIDE = 1,
+    GHOSTTY_CELL_WIDE_SPACER_TAIL = 2,
+    GHOSTTY_CELL_WIDE_SPACER_HEAD = 3,
+} ghostty_cell_wide_e;
+
+typedef enum {
+    GHOSTTY_CELL_COLOR_DEFAULT = 0,
+    GHOSTTY_CELL_COLOR_PALETTE = 1,
+    GHOSTTY_CELL_COLOR_RGB = 2,
+} ghostty_cell_color_kind_e;
+
+typedef enum {
+    GHOSTTY_CELL_UNDERLINE_NONE = 0,
+    GHOSTTY_CELL_UNDERLINE_SINGLE = 1,
+    GHOSTTY_CELL_UNDERLINE_DOUBLE = 2,
+    GHOSTTY_CELL_UNDERLINE_CURLY = 3,
+    GHOSTTY_CELL_UNDERLINE_DOTTED = 4,
+    GHOSTTY_CELL_UNDERLINE_DASHED = 5,
+} ghostty_cell_underline_kind_e;
+
+typedef enum {
+    GHOSTTY_CELL_SEMANTIC_NONE = 0,
+    GHOSTTY_CELL_SEMANTIC_PROMPT = 1,
+    GHOSTTY_CELL_SEMANTIC_PROMPT_CONTINUATION = 2,
+    GHOSTTY_CELL_SEMANTIC_INPUT = 3,
+    GHOSTTY_CELL_SEMANTIC_OUTPUT = 4,
+} ghostty_cell_semantic_e;
+
+typedef struct {
+    uint8_t fg_kind;       /* ghostty_cell_color_kind_e */
+    uint8_t fg_palette;
+    uint8_t fg_rgb[3];
+    uint8_t bg_kind;
+    uint8_t bg_palette;
+    uint8_t bg_rgb[3];
+    uint8_t underline_kind;       /* ghostty_cell_underline_kind_e */
+    uint8_t underline_color_kind; /* ghostty_cell_color_kind_e */
+    uint8_t underline_palette;
+    uint8_t underline_rgb[3];
+    uint32_t attrs_bitset;
+    /* bit0=bold bit1=italic bit2=faint bit3=blink
+       bit4=inverse bit5=invisible bit6=strikethrough */
+} ghostty_cell_style_s;
+
+typedef struct {
+    const uint32_t* codepoints;   /* borrowed into grid arena */
+    size_t codepoints_count;
+    uint8_t wide;                 /* ghostty_cell_wide_e */
+    uint32_t style_id;            /* index into grid.styles */
+    uint8_t semantic;             /* ghostty_cell_semantic_e */
+    uint32_t hyperlink_id;        /* 0 = none, else index into hyperlink table */
+} ghostty_cell_s;
+
+typedef struct {
+    bool wrap;
+    bool wrap_continuation;
+    const ghostty_cell_s* cells;
+    size_t cells_count;
+} ghostty_cell_row_s;
+
+/* D26: per-call hyperlink URI table — Cell.hyperlink_id indexes here. */
+typedef struct {
+    const char* const* uris;  /* NUL-terminated UTF-8; uris[0] is unused (id 0 = none) */
+    size_t count;
+} ghostty_hyperlink_table_s;
+
+typedef struct {
+    uint32_t cols;
+    uint32_t rows_count;
+    bool alt_screen;
+    bool semantic_available;   /* D27: any row had OSC 133 marker */
+    uint32_t cursor_row;
+    uint32_t cursor_col;
+    bool cursor_visible;
+    uint8_t cursor_style;      /* 0=block 1=underline 2=bar */
+    const ghostty_cell_row_s* rows;
+    const ghostty_cell_style_s* styles;
+    size_t styles_count;
+    ghostty_hyperlink_table_s hyperlinks;
+} ghostty_cell_grid_s;
+
+GHOSTTY_API bool ghostty_surface_read_cells(
+    ghostty_surface_t surface,
+    ghostty_cell_region_e region,
+    ghostty_cell_grid_s* result
+);
+
+GHOSTTY_API void ghostty_cell_grid_free(
+    ghostty_surface_t surface,
+    ghostty_cell_grid_s* result
+);
+
+/* --- cmux patch #2: PTY output tee (header-only declarations) --- */
+/*
+ * Register a non-blocking callback invoked under renderer_state.mutex
+ * on the io-reader thread with each PTY byte slice as it lands. The
+ * callback MUST be zero-allocation / non-blocking — memcpy + return
+ * (D7). cmux's Sources/HTTPControl/OutputTee.swift owns the bounded
+ * ring per subscriber; this callback only fills the ring.
+ *
+ * Pass cb=NULL to detach. userdata is opaque to ghostty.
+ */
+
+typedef void (*ghostty_output_tee_cb)(const uint8_t* bytes, size_t len, void* userdata);
+
+GHOSTTY_API void ghostty_surface_set_output_tee(
+    ghostty_surface_t surface,
+    ghostty_output_tee_cb cb,
+    void* userdata
+);
+
+/* --- end cmux patches --- */
+
 #ifdef __cplusplus
 }
 #endif
