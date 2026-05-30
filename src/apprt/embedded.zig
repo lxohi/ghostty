@@ -2340,3 +2340,76 @@ pub const CAPI = struct {
         }
     };
 };
+
+// --- cmux patches #1 + #2: cell-grid export + PTY output tee ---
+//
+// Minimal stub implementations honoring the C ABI declared in
+// include/ghostty.h. The real direct-page-walk implementation +
+// PTY tee wiring are tracked in the cmux 88-task plan
+// (Tasks 1.6 cells impl, 2.2 tee impl). These stubs ensure the fork
+// branch builds + the xcframework can be regenerated with the new
+// symbols present; cmux's Swift bridge (AppSurfaceProvider.readCells)
+// reports .unsupported until the real implementations land.
+//
+// Contract:
+// - ghostty_surface_read_cells: returns false (failure) until the
+//   real impl is wired. Result struct left zeroed.
+// - ghostty_cell_grid_free: no-op for stub-produced grids; safe to
+//   call on a never-allocated result (its members are NULL).
+// - ghostty_surface_set_output_tee: stores the callback pointer for
+//   future invocation. The Termio integration that actually invokes
+//   it under renderer_state.mutex is Task 2.2 — until that lands,
+//   the callback is never called.
+
+const GhosttyCellGrid = extern struct {
+    cols: u32,
+    rows_count: u32,
+    alt_screen: bool,
+    semantic_available: bool,
+    cursor_row: u32,
+    cursor_col: u32,
+    cursor_visible: bool,
+    cursor_style: u8,
+    rows: ?[*]const u8,   // const ghostty_cell_row_s*
+    styles: ?[*]const u8, // const ghostty_cell_style_s*
+    styles_count: usize,
+    hyperlinks_uris: ?[*]const ?[*:0]const u8,
+    hyperlinks_count: usize,
+};
+
+const GhosttyOutputTeeCallback = ?*const fn (bytes: [*]const u8, len: usize, userdata: ?*anyopaque) callconv(.C) void;
+
+export fn ghostty_surface_read_cells(
+    surface: *anyopaque,
+    region: c_uint,
+    result: *GhosttyCellGrid,
+) callconv(.C) bool {
+    _ = surface;
+    _ = region;
+    result.* = std.mem.zeroes(GhosttyCellGrid);
+    return false;
+}
+
+export fn ghostty_cell_grid_free(
+    surface: *anyopaque,
+    result: *GhosttyCellGrid,
+) callconv(.C) void {
+    _ = surface;
+    result.* = std.mem.zeroes(GhosttyCellGrid);
+}
+
+export fn ghostty_surface_set_output_tee(
+    surface: *anyopaque,
+    cb: GhosttyOutputTeeCallback,
+    userdata: ?*anyopaque,
+) callconv(.C) void {
+    _ = surface;
+    _ = cb;
+    _ = userdata;
+    // Real implementation: wire `cb`+`userdata` into the surface's
+    // Termio so processOutput tees each PTY read into `cb` under the
+    // existing renderer_state.mutex (Task 2.2 in cmux plan). The stub
+    // simply discards — the cb is never invoked.
+}
+
+// --- end cmux patches ---
